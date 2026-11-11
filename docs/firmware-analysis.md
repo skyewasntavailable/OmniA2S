@@ -10,7 +10,7 @@ Source: official updater package (`Ampero II Stomp Firmware V2.5.0.bin`, 11,874,
   (looks like a 16 MB flash layout; flag/checksum words `0x0100DB0E`, `0x02008E57`, `0x10004476` per entry – meaning unknown).
 - 0x90: test pattern `55555555 AAAAAAAA A5A5A5A5`, then a Cortex-M vector table (SP 0x20004000, reset 0x4E9).
 - **No encryption signature**: plaintext strings, file paths and float tables are visible. Entropy is 7.2–7.5 over most of the file and ~7.95 over 0x80000–0x17FFFF (compressed or packed data).
-- The code/strings look byte-interleaved (stray bytes inside strings, many 0x22 bytes), so some regions use an unidentified compression/packing scheme. Next step: identify it.
+- Earlier guess that the strings were byte-interleaved by a compressor was **wrong for the main app**: see "Step 1 findings" below.
 
 ## Chips (from firmware strings)
 - **Main MCU: NXP i.MX RT1052** (Cortex-M7). Paths like `Drivers\devices\MIMXRT1052\drivers\fsl_*.c`, FlexSPI driver (external QSPI flash), eDMA, ADC_ETC. UI/touch/presets run here (`Drivers\GUI`, `Drivers\audio\PresetInterface`).
@@ -30,3 +30,28 @@ Source: official updater package (`Ampero II Stomp Firmware V2.5.0.bin`, 11,874,
 2. Extract ESP32 app and both SHARC .dxe files (ELF-like); identify SHARC part from the .dxe.
 3. Map the effect table and patch/IR storage format.
 4. Work out how the updater validates the file (checksums/signature) before any modified flash.
+
+## Step 1 findings: packing / region map (`tools/regionmap.py`)
+Result: **no outer compression or encryption layer was found.** Standard decoders (zlib/deflate scan, LZ4 block, gzip/zstd/xz magic) found nothing. The image is a plain container of several differently-typed regions:
+
+| File offset | Content | Evidence |
+|---|---|---|
+| 0x000000-0x000080 | HTFW header + segment table | see above |
+| 0x000080-0x000200 | start-up block: test pattern, Cortex-M vector table | low-level "token" bytes (see open issue) |
+| 0x0001EE-~0x07xxxx | **Cortex-M7 application (Thumb-2), plain** | Thumb function-return/prologue markers (`70 47`, `10 b5`, ...) dense only here; clean disassembly of reset handler, `VTOR` literal `0xE000ED08`, Keil-style per-object strings with assert paths |
+| 0x080000-0x16FFFF | **high entropy (7.97), unknown** | ~512 KB flat; candidate for encrypted/compressed payload (ESP32 app or DSP image?) |
+| 0x170000-0x2FFFFF (mixed) | 7.1-7.4 entropy, no lane structure | not Thumb; likely DSP code/data or a packed resource area. `MP-300_DSP_Main_Core1.dxe` name sits at 0x2C6692 |
+| ~0x220000-0x300000 | 4-byte/2-byte lane structure | tables/graphics (RGB565-like) |
+| 0x300000-0x61FFFF, 0x890000-0xB4xxxx | **16-bit sample data** (lanes 0/2 ~7.99, lanes 1/3 ~5.7) | looks like PCM/IR (cab) data |
+| 0x620000-0x88FFFF | 7.2-7.3 entropy, no lane structure | not Thumb; likely DSP image/data. `MP-300_DSP_Main_Core2.dxe` name at 0x8903F5, right after it |
+
+The two `.dxe` names look like entries of a file table (name followed by metadata and float tables), so the SHARC code is probably in the 0x170000-0x2FFFFF and 0x620000-0x88FFFF areas, but this is unconfirmed.
+
+### Open issues
+1. Vector table / start-up area (0x9A-0x1EE and a similar block around 0x2FD-0x3A0) contains short 1-3 byte insertions (frequent `0xAC`, `0x22`) between otherwise plain 32-bit words. File vs. memory layout is not 1:1 there (reset vector 0x4E9 but reset code is at file 0x2B4). Probably an encoding of the vector table / relocation data; undecoded.
+2. Load/base address of the app for Ghidra is still unknown; literals show addresses of the form 0x0000xxxx and 0x0001xxxx, i.e. ITCM-like, with the code relocated by the boot stage.
+3. 0x80000-0x16FFFF high-entropy block: need to determine whether this is encrypted or compressed (check chi-square, try known AES/XOR keys from the ARM code, look for the decryption routine in the app).
+
+### Suggested next steps
+- Disassemble the app in Ghidra (ARM Cortex-M, little-endian) and find the update/IAP/DFU code (`IAP`, `DFU`, `ESP32_APP` strings at 0x1837D / 0x19B968) - it will show how segments are verified and decrypted/decompressed.
+- Follow references to the `.dxe` names to learn the file-table format.
