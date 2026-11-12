@@ -55,3 +55,10 @@ The two `.dxe` names look like entries of a file table (name followed by metadat
 ### Suggested next steps
 - Disassemble the app in Ghidra (ARM Cortex-M, little-endian) and find the update/IAP/DFU code (`IAP`, `DFU`, `ESP32_APP` strings at 0x1837D / 0x19B968) - it will show how segments are verified and decrypted/decompressed.
 - Follow references to the `.dxe` names to learn the file-table format.
+
+## DSP investigation (first pass)
+- Only two DSP-related names exist in the image: `MP-300_DSP_Main_Core1.dxe` (0x2C668B) and `MP-300_DSP_Main_Core2.dxe` (0x8903EE). No ELF magic, no `.ldr` names, no `SHARC`/`ADSP` strings.
+- Each name sits inside a structured record: neighbouring bytes look like pointers/flags (`... 00 60 80 ...`, `ac 28 00 60 80`) followed by float tables (e.g. sine/coefficient data `3d...`), not instruction streams. They are most likely file-table entries (name + metadata) for DSP/effect resources, not the executables themselves.
+- The same kind of 1-3 byte stray tokens (`0xAC`, `0x22`) that appear in the ARM vector table also appear around these records, so the unexplained encoding is probably general and must be decoded before the DSP code can be extracted.
+- The 7.1-7.4 entropy blocks have no 4- or 6-byte lane structure, so they are not raw 32-bit or 48-bit SHARC words; they are probably packed.
+- Disassembly will also need a SHARC+ instruction decoder; I do not believe stock Ghidra ships one (not verified).
